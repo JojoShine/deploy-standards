@@ -28,7 +28,7 @@ curl --fail http://127.0.0.1:31001/healthz
 
 ## 镜像与数据库
 
-`docker build --target runtime` 生成应用镜像，`docker build --target migrate` 生成数据库工具镜像。应用以非 root 用户监听 8080；工具使用 PostgreSQL 16 的 `psql`。两个操作入口分别为 `/app/bin/migrate` 和 `/app/bin/bootstrap`。`DATABASE_URL` 通过环境传入工具，连接凭据不会出现在命令参数中。
+`docker build --target runtime` 生成应用镜像，`docker build --target migrate` 生成数据库工具镜像。应用以非 root 用户监听 8080；工具使用 PostgreSQL 16 的 `psql`，通过镜像内的 Python 标准库将 URL 转换成 libpq 环境变量。两个操作入口分别为 `/app/bin/migrate` 和 `/app/bin/bootstrap`。`DATABASE_URL` 通过环境传入工具，连接凭据不会出现在命令参数中。
 
 迁移创建 `app_schema_migrations` 版本记录和 `starter_settings` 演示表。初始化仅插入缺失的 `welcome` 键，不修改已有值，也不创建或重置账号密码。两者可重复执行并使用同一事务锁串行化；初始化前必须先迁移。开发真实迁移时保留历史，使用与旧版应用兼容的 expand/contract 变更，禁止将破坏性数据库回退当成应用回滚。
 

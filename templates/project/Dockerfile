@@ -11,9 +11,10 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=12 CMD ["/ap
 CMD ["node", "src/server.js"]
 
 FROM postgres:16-alpine AS migrate
+RUN apk add --no-cache python3
 WORKDIR /app
 COPY --chown=postgres:postgres sql ./sql
-COPY --chown=postgres:postgres --chmod=755 bin/migrate bin/bootstrap ./bin/
+COPY --chown=postgres:postgres --chmod=755 bin/migrate bin/bootstrap bin/db.py ./bin/
 USER postgres
 ENTRYPOINT []
 CMD ["/app/bin/migrate"]

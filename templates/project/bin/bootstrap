@@ -1,5 +1,3 @@
 #!/bin/sh
 set -eu
-: "${DATABASE_URL:?DATABASE_URL is required}"
-export PGDATABASE="$DATABASE_URL"
-exec psql --no-psqlrc --set=ON_ERROR_STOP=1 --file=/app/sql/bootstrap.sql
+exec python3 /app/bin/db.py bootstrap

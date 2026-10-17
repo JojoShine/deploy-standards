@@ -19,7 +19,7 @@ try:
         time.sleep(1)
     else:raise RuntimeError('runtime image health check failed')
     data=json.loads(subprocess.check_output(['docker','inspect',app],text=True))[0]
-    if data['Config']['User'] in ['','root','0','0:0']:raise ValueError('runtime image must use a non-root user')
+    if data['Config']['User'].split(':',1)[0] in ['','root','0']:raise ValueError('runtime image must use a non-root user')
     if not data['Config'].get('Healthcheck'):raise ValueError('runtime image must define HEALTHCHECK')
     print('Image smoke passed: repeat migrations/bootstrap, health, non-root user.')
 finally:
