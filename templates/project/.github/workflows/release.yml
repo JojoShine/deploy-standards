@@ -1,0 +1,21 @@
+name: Release
+on:
+  push:
+    tags: [v*]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    uses: JojoShine/deploy-standards/.github/workflows/release.yml@__STANDARDS_REF__
+    with:
+      business: __BUSINESS__
+      base-path: ""
+      variant: ""
+      standard-ref: __STANDARDS_REF__

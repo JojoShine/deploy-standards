@@ -1,0 +1,154 @@
+name: CI and candidate images
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      business:
+        required: true
+        type: string
+      checks:
+        type: string
+        default: npm test
+      build-context:
+        type: string
+        default: .
+      dockerfile:
+        type: string
+        default: Dockerfile
+      base-path:
+        type: string
+        default: ""
+      variant:
+        type: string
+        default: ""
+      postgres-image:
+        type: string
+        default: postgres:16-alpine
+      standard-ref:
+        required: true
+        type: string
+    outputs:
+      app-image:
+        value: ${{ jobs.candidate.outputs.app-image }}
+      migrate-image:
+        value: ${{ jobs.candidate.outputs.migrate-image }}
+      commit:
+        value: ${{ jobs.candidate.outputs.commit }}
+permissions:
+  contents: read
+concurrency:
+  group: standard-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image || 'postgres:16-alpine' }}
+        env:
+          POSTGRES_DB: standard
+          POSTGRES_USER: standard
+          POSTGRES_PASSWORD: ci_only_password
+        ports: [5432:5432]
+        options: --health-cmd "pg_isready -U standard -d standard" --health-interval 5s --health-retries 20
+    env:
+      BUSINESS: ${{ inputs.business || 'deploy-standards-example' }}
+      STANDARD_REF: ${{ inputs.standard-ref || github.sha }}
+      BUILD_CONTEXT: ${{ inputs.build-context || '.' }}
+      DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile' }}
+      CHECKS: ${{ inputs.checks || 'npm run check' }}
+      BASE_PATH: ${{ inputs.base-path }}
+      VARIANT: ${{ inputs.variant }}
+      DATABASE_URL: postgresql://standard:ci_only_password@127.0.0.1:5432/standard
+      POSTGRES_IMAGE: ${{ inputs.postgres-image || 'postgres:16-alpine' }}
+    outputs:
+      app-image: ${{ steps.record.outputs.app-image }}
+      migrate-image: ${{ steps.record.outputs.migrate-image }}
+      commit: ${{ steps.prepare.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: JojoShine/deploy-standards
+          ref: ${{ env.STANDARD_REF }}
+          path: .standards
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Validate contract and select project
+        id: prepare
+        env:
+          NATIVE: ${{ inputs.business == '' }}
+        run: |
+          python -m pip install -r .standards/requirements-dev.txt
+          PYTHONPATH=.standards/tools python -c 'import os; from standards import validate_business,validate_sha,validate_base_path; validate_business(os.environ["BUSINESS"]); validate_sha(os.environ["STANDARD_REF"]); validate_base_path(os.environ["BASE_PATH"])'
+          commit=$(git -C project rev-parse HEAD)
+          echo "COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          if [ "$NATIVE" = true ]; then
+            python .standards/tools/init-project.py --business "$BUSINESS" --output "$RUNNER_TEMP/reference" --standards-ref "$STANDARD_REF" --owner "$GITHUB_REPOSITORY_OWNER"
+            project_dir="$RUNNER_TEMP/reference"
+          else
+            project_dir="$GITHUB_WORKSPACE/project/$BUILD_CONTEXT"
+          fi
+          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
+          python .standards/tools/check-compose.py "$project_dir/compose.prod.yaml"
+          python .standards/tools/check-callers.py --project-dir "$project_dir" --standards-ref "$STANDARD_REF" --business "$BUSINESS"
+      - name: Verify standard tooling
+        if: inputs.business == ''
+        run: |
+          python -m unittest discover -s project/tests -v
+          for script in project/scripts/*.sh; do bash -n "$script"; done
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install "github.com/rhysd/actionlint/cmd/actionlint@$(cat project/tools/actionlint-version)"
+          "$RUNNER_TEMP/bin/actionlint" -color project/.github/workflows/*.yml
+      - name: Project checks
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: bash -eo pipefail -c "$CHECKS"
+      - name: Build and exercise the actual images
+        run: |
+          epoch=$(git -C project show -s --format=%ct "$COMMIT")
+          docker buildx build --load --platform linux/amd64 --target runtime --file "$PROJECT_DIR/$DOCKERFILE" --build-arg "APP_VERSION=$COMMIT" --build-arg "NEXT_PUBLIC_BASE_PATH=$BASE_PATH" --build-arg "SOURCE_DATE_EPOCH=$epoch" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$COMMIT" --label "org.opencontainers.image.version=sha-$COMMIT" --label org.opencontainers.image.licenses=MIT -t standard-app:tested "$PROJECT_DIR"
+          docker buildx build --load --platform linux/amd64 --target migrate --file "$PROJECT_DIR/$DOCKERFILE" --build-arg "SOURCE_DATE_EPOCH=$epoch" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$COMMIT" --label "org.opencontainers.image.version=sha-$COMMIT" --label org.opencontainers.image.licenses=MIT -t standard-migrate:tested "$PROJECT_DIR"
+          python .standards/tools/smoke-images.py --app standard-app:tested --migrate standard-migrate:tested --postgres-image "$POSTGRES_IMAGE" --base-path "$BASE_PATH"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python .standards/tools/publish-candidate.py --business "$BUSINESS" --commit "$COMMIT" --repository "$GITHUB_REPOSITORY" --app-local standard-app:tested --migrate-local standard-migrate:tested --output candidate.json --base-path "$BASE_PATH" --variant "$VARIANT"
+      - name: Export image references
+        id: record
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          python - <<'PYCODE'
+          import json,os
+          d=json.load(open('candidate.json'))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              for key in ['app','migrate']:f.write(key+'-image='+d['images'][key]['ref']+'\n')
+          PYCODE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: candidate-${{ steps.prepare.outputs.commit }}
+          path: candidate.json
+          retention-days: 90
+          if-no-files-found: error

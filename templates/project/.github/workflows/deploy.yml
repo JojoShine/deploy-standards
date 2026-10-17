@@ -1,0 +1,44 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      environment:
+        description: GitHub deployment environment
+        required: true
+        default: production
+        type: string
+      public-health-url:
+        description: Public HTTPS health endpoint, including BASE_PATH
+        required: true
+        type: string
+      app-port:
+        description: Allocated loopback host port (31000-31999)
+        required: true
+        default: 31001
+        type: number
+permissions:
+  contents: read
+concurrency:
+  group: deploy-__BUSINESS__-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    uses: JojoShine/deploy-standards/.github/workflows/deploy.yml@__STANDARDS_REF__
+    with:
+      business: __BUSINESS__
+      version: ${{ inputs.version }}
+      environment: ${{ inputs.environment }}
+      public-health-url: ${{ inputs.public-health-url }}
+      app-port: ${{ inputs.app-port }}
+      standard-ref: __STANDARDS_REF__
+    secrets:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}

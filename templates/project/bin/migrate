@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+: "${DATABASE_URL:?DATABASE_URL is required}"
+# libpq reads the connection URL from its environment, keeping passwords out of argv.
+export PGDATABASE="$DATABASE_URL"
+exec psql --no-psqlrc --set=ON_ERROR_STOP=1 --file=/app/sql/migrate.sql
