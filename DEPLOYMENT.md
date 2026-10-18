@@ -6,6 +6,7 @@
 
 - GitHub Actions 负责检查、构建镜像，并推送到 GHCR。
 - 生产服务器只下载部署配置、拉取镜像和运行容器，不上传业务源码，不在服务器安装业务依赖或构建镜像。
+- 每个应用只构建和发布一个业务镜像，包含应用、数据库迁移和首次初始化所需文件及工具；三者共用同一版本的镜像摘要。
 - 应用运行、数据库迁移、首次初始化分开执行；构建和应用启动时不自动迁移或初始化。
 - 生产使用外部 PostgreSQL；数据库地址和凭据由环境配置提供。
 - 公网入口统一由宿主机 Nginx 提供，应用端口仅绑定本机。
@@ -39,14 +40,15 @@ nginx/business.conf.example    # 独立业务片段，供现有 server 加载
 
 ## 3. Docker 构建与数据库任务
 
-一个 Dockerfile 固定提供两个最终目标：
+一个 Dockerfile 只提供一个用于发布的最终目标 `runtime`，镜像同时包含：
 
-| 目标 | 镜像内容 | 执行时机 |
-| --- | --- | --- |
-| `runtime` | 编译后的应用和必要运行依赖 | 持续运行应用 |
-| `migrate` | 对应版本的迁移、初始化文件及执行工具 | 部署时显式运行一次性任务 |
+- 编译后的应用和必要运行依赖。
+- 对应版本的数据库迁移文件、迁移工具及其运行依赖。
+- 首次初始化文件及所需执行工具。
 
-不为初始化再构建第三个镜像。统一入口由项目实现：
+允许使用多阶段构建，但最终只发布这个业务镜像，不单独构建迁移或初始化镜像。运行迁移时无需下载源码或临时安装依赖。镜像默认启动应用，通过覆盖启动命令执行迁移或初始化；项目入口脚本必须正确执行传入的命令。
+
+统一入口由项目实现：
 
 - `/app/bin/healthcheck`：检查应用及必要数据库连接；失败返回非零状态。
 - `/app/bin/migrate`：执行尚未执行的生产迁移，重复运行安全。
@@ -62,13 +64,12 @@ nginx/business.conf.example    # 独立业务片段，供现有 server 加载
 
 | 用途 | 格式 |
 | --- | --- |
-| 应用镜像 | `ghcr.io/<owner>/<business>-app` |
-| 迁移镜像 | `ghcr.io/<owner>/<business>-migrate` |
+| 业务镜像（应用、迁移、初始化共用） | `ghcr.io/<owner>/<business>` |
 | 提交标签 | `sha-<完整提交SHA>` |
 | 正式版本标签 | `v<主版本>.<次版本>.<修订版本>`，例如 `v1.2.3` |
-| 生产实际引用 | `ghcr.io/<owner>/<business>-app@sha256:<digest>` |
+| 生产实际引用 | `ghcr.io/<owner>/<business>@sha256:<digest>` |
 
-同一正式版本的应用、迁移镜像必须来自同一提交。不同构建产物需要区分标签，例如不同路径前缀使用 `v1.2.3-surveys` 与对应的 SHA 变体标签；在项目中明确变体名称和构建参数。
+一个业务使用一个镜像仓库，不另建 `-migrate` 仓库或迁移专用镜像标签。同一正式版本的应用、迁移和初始化必须使用同一个镜像 digest，而不仅是来自同一提交。不同构建产物需要区分标签，例如不同路径前缀使用 `v1.2.3-surveys` 与对应的 SHA 变体标签；在项目中明确变体名称和构建参数。
 
 提交标签和正式版本标签不得覆盖。正式发布复用已经通过 CI 的镜像摘要，增加版本标签，不重新构建。生产配置固定 digest，不使用 `latest` 等浮动引用。镜像记录来源仓库、提交、版本和许可证信息。
 
@@ -76,8 +77,8 @@ nginx/business.conf.example    # 独立业务片段，供现有 server 加载
 
 固定流程：
 
-1. PR：安装锁定依赖，执行项目必要的检查、测试、构建，验证两个镜像；不发布生产镜像。
-2. main：完成相同验证，使用隔离数据库实际验证迁移、重复初始化、应用启动和健康检查，再将验收的镜像推送 GHCR，记录提交与 digest。
+1. PR：安装锁定依赖，执行项目必要的检查、测试、构建，验证统一业务镜像；不发布生产镜像。
+2. main：完成相同验证，使用同一个业务镜像和隔离数据库实际验证迁移、重复初始化、应用启动和健康检查，再将验收的镜像推送 GHCR，记录提交与 digest。
 3. `vX.Y.Z` 标签：确认该提交在 main 且 CI 成功，将对应镜像提升为版本标签，发布匹配的部署文件和镜像 digest。
 4. 服务器：获取该版本的配置，填入环境参数，拉取准确镜像并部署。
 
@@ -89,7 +90,7 @@ GHCR 公开镜像允许服务器匿名拉取；私有镜像使用只读凭据。
 
 ## 6. Compose 与端口
 
-生产 Compose 固定 `app` 和一次性 `migrate` 服务。下面是结构示例，项目按实际需要补充应用环境变量：
+生产 Compose 固定 `app` 和一次性 `migrate` 服务，两个服务的 `image` 均引用同一个 `APP_IMAGE`。这里是同一镜像的两种运行方式，不是两个镜像。下面是结构示例，项目按实际需要补充应用环境变量：
 
 ```yaml
 services:
@@ -110,7 +111,7 @@ services:
       start_period: 15s
       retries: 12
   migrate:
-    image: ${MIGRATE_IMAGE:?MIGRATE_IMAGE is required}
+    image: ${APP_IMAGE:?APP_IMAGE is required}
     profiles: [ops]
     restart: "no"
     environment:
@@ -124,7 +125,7 @@ services:
 - 生产 Compose 不含 `build`、源码挂载或数据库服务；不设置跨项目冲突的固定 `container_name`。
 - Compose 项目名固定为 `<business>-<environment>`，升级时保持不变，例如 `qingwen-production`。
 
-环境配置至少包含 `COMPOSE_PROJECT_NAME`、`APP_IMAGE`、`MIGRATE_IMAGE`、`APP_PORT`、`BASE_PATH`、`DATABASE_URL` 和 `MIGRATION_DATABASE_URL`。应用只接收运行角色凭据，迁移接收具有必要 DDL 权限的迁移角色凭据；初始化秘密仅传给初始化任务。
+环境配置至少包含 `COMPOSE_PROJECT_NAME`、`APP_IMAGE`、`APP_PORT`、`BASE_PATH`、`DATABASE_URL` 和 `MIGRATION_DATABASE_URL`。只配置一个 `APP_IMAGE`，不再设置独立的迁移镜像变量。应用只接收运行角色凭据，迁移接收具有必要 DDL 权限的迁移角色凭据；初始化秘密仅传给初始化任务。
 
 容器访问宿主机数据库时不能使用容器自身的 `127.0.0.1`。如采用 `host.docker.internal`，在相关服务配置 `extra_hosts: ["host.docker.internal:host-gateway"]`，并按实际 Docker 子网配置 PostgreSQL 监听和访问权限。
 
@@ -193,7 +194,7 @@ docker compose --env-file .env.prod -f compose.prod.yaml ps
 curl --fail https://<domain>/<base-path>/healthz
 ```
 
-健康 URL 按实际入口填写；无前缀时为 `https://<domain>/healthz`。上面的命令逐步执行，前一步失败即停止。首次部署成功后，如业务需要，再显式运行初始化：
+健康 URL 按实际入口填写；无前缀时为 `https://<domain>/healthz`。上面的命令逐步执行，前一步失败即停止。首次部署成功后，如业务需要，再使用同一个业务镜像显式运行初始化：
 
 ```sh
 docker compose --env-file .env.prod -f compose.prod.yaml run --rm --no-deps migrate /app/bin/bootstrap
